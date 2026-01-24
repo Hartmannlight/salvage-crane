@@ -32,6 +32,7 @@ jobs:
           filters: |
             dummy: "${{ env.CRANE_DIR }}/dummy/**"
             borgbackup: "${{ env.CRANE_DIR }}/borgbackup/**"
+            restic: "${{ env.CRANE_DIR }}/restic/**"
 
   build-docker:
     name: Build crane images
@@ -46,6 +47,7 @@ jobs:
     steps:
       - name: "Login to registry"
         id: registry-login
+        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
         uses: "docker/login-action@v2"
         with:
           registry: ghcr.io
@@ -77,6 +79,6 @@ jobs:
         uses: docker/build-push-action@v3
         with:
           context: "${{ env.CRANE_DIR }}/${{ matrix.crane }}"
-          push: true
+          push: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
