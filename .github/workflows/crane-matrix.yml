@@ -34,6 +34,41 @@ jobs:
             borgbackup: "${{ env.CRANE_DIR }}/borgbackup/**"
             restic: "${{ env.CRANE_DIR }}/restic/**"
 
+  restic-quality:
+    name: Restic quality checks
+    needs: changes
+    if: ${{ contains(needs.changes.outputs.cranes, 'restic') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: "actions/checkout@v3"
+
+      - name: Install shellcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+
+      - name: Run restic script tests
+        run: bash cranes/restic/test.sh
+
+      - name: Validate shell syntax
+        run: |
+          bash -n cranes/restic/binary.sh
+          bash -n cranes/restic/test.sh
+          bash -n cranes/restic/tools/preflight.sh
+          bash -n cranes/restic/tools/install.sh
+          bash -n cranes/restic/tools/run-crane-smoke.sh
+
+      - name: Run shellcheck
+        run: |
+          shellcheck cranes/restic/binary.sh
+          shellcheck cranes/restic/test.sh
+          shellcheck cranes/restic/tools/preflight.sh
+          shellcheck cranes/restic/tools/install.sh
+          shellcheck cranes/restic/tools/run-crane-smoke.sh
+
   build-docker:
     name: Build crane images
     needs: changes

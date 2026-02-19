@@ -7,6 +7,7 @@ RUN apk add --no-cache \
       bash \
       ca-certificates \
       curl \
+      openssh-client \
       bzip2 \
   && update-ca-certificates \
   && ARCH="${TARGETARCH:-amd64}" \

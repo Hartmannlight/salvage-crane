@@ -1,71 +1,167 @@
 # Salvage Restic Crane
 
-This crane backs up the Salvage-provided directories:
+This crane backs up both Salvage-provided paths:
 
-- /salvage/volume (read-only mount of the Docker volume)
-- /salvage/meta (metadata directory)
+- `/salvage/volume` (read-only Docker volume mount)
+- `/salvage/meta` (metadata from Salvage)
 
-## Required environment variables
+The implementation is defensive by default:
 
-Salvage provides:
+- strict env validation
+- automatic repository init when missing
+- backup fails on incomplete snapshots
+- post-backup snapshot verification (enabled by default)
 
-- SALVAGE_MACHINE_NAME
-- SALVAGE_CRANE_NAME
-- SALVAGE_VOLUME_NAME
-- SALVAGE_TIDE_TIMESTAMP
+## Required inputs
 
-Crane requires:
+Salvage provides these automatically:
 
-- REPO_BASE_LOCATION (supports rotation via ';', e.g. /repo/a;/repo/b;/repo/c)
-- RESTIC_PASSWORD_FILE (recommended) or RESTIC_PASSWORD
+- `SALVAGE_MACHINE_NAME`
+- `SALVAGE_CRANE_NAME`
+- `SALVAGE_VOLUME_NAME`
+- `SALVAGE_TIDE_TIMESTAMP` (epoch seconds)
 
-## Safe defaults
+You must provide authentication:
 
-- SINGLE_REPO=true
-- RESTIC_RETRY_LOCK=1h
-- FORGET_ARGS empty (retention disabled)
-- DO_PRUNE=false
+- `RESTIC_PASSWORD_FILE` (recommended) or `RESTIC_PASSWORD`
 
-## Snapshot identity (important)
+You must provide repository configuration by either:
 
-By default, snapshots use:
+1. `REPO_BASE_LOCATION`
+2. or full SFTP tuple: `SFTP_HOST`, `SFTP_USER`, `SFTP_PATH` (optional `SFTP_PORT`, default `23`)
 
-- --host "${SALVAGE_MACHINE_NAME}-${SALVAGE_VOLUME_NAME}"
-- tags: salvage, vol-..., machine-..., crane-...
+`REPO_BASE_LOCATION` also supports deterministic rotation with `;`, for example:
 
-This keeps retention scoped to the correct volume.
+- `REPO_BASE_LOCATION=/repo/a;/repo/b;/repo/c`
 
-## Optional settings
+## Defaults and safety controls
 
-- RESTIC_ARGS: extra global args for restic
-- BACKUP_ARGS: extra args for restic backup
-- RESTIC_HOST: override host value
-- RESTIC_CACHE_DIR: mount a writable cache volume for better performance
+- `SINGLE_REPO=true`
+- `RESTIC_RETRY_LOCK=1h`
+- `VERIFY_SNAPSHOT=true`
+- `VERIFY_REPOSITORY_CHECK=false`
+- `DO_PRUNE=false`
+- `FORGET_ARGS` empty (retention disabled)
+- `STRICT_HOST_KEY_CHECKING=true` (for SFTP repositories)
+
+Snapshot identity defaults:
+
+- host: `${SALVAGE_MACHINE_NAME}-${SALVAGE_VOLUME_NAME}`
+- tags: `salvage`, `vol-<volume>`, `machine-<machine>`, `crane-<crane>`
+
+This keeps retention scoped to the correct backup unit.
+
+## Optional environment variables
+
+- `RESTIC_ARGS`: additional global restic args (advanced)
+- `BACKUP_ARGS`: additional `restic backup` args (advanced)
+- `RESTIC_HOST`: override snapshot host identity
+- `RESTIC_CACHE_DIR`: writable cache mount
+- `VERIFY_REPOSITORY_CHECK=true`: run `restic check` after backup
+- `VERIFY_REPOSITORY_CHECK_READ_DATA_SUBSET=1/200`: optional subset for `restic check`
+- `SSH_KEY_FILE`: SSH key path for SFTP repos (default `/root/.ssh/id_ed25519`)
+- `SSH_KNOWN_HOSTS_FILE`: known_hosts path (default `/root/.ssh/known_hosts`)
+- `STRICT_HOST_KEY_CHECKING=false`: disables strict host key enforcement (not recommended)
+
+## Repository mode
+
+Single repository mode (default):
+
+- `SINGLE_REPO=true`
+- repository target is the selected base location
+
+Per-volume repository mode:
+
+- `SINGLE_REPO=false`
+- repository becomes: `<base>/<machine>/<volume>`
 
 ## Retention and prune
 
-Retention is only enabled when FORGET_ARGS is set. Forget is always scoped by
-host and tags to avoid deleting snapshots from other volumes. Prune is only
-added when DO_PRUNE=true.
+Retention runs only when `FORGET_ARGS` is set.
+Forget is always scoped by host and tags.
+Prune is only appended when `DO_PRUNE=true`.
 
-## Multi repo mode (one repository per volume)
+## Example Salvage labels
 
-Set:
+```text
+salvage.cranes.restic.image=ghcr.io/<owner>/<repo>-restic:master
+salvage.cranes.restic.env.REPO_BASE_LOCATION=sftp://user@host:23/salvage
+salvage.cranes.restic.env.RESTIC_PASSWORD_FILE=/run/secrets/restic_password
+salvage.cranes.restic.env.RESTIC_CACHE_DIR=/cache
+salvage.cranes.restic.mount.salvage-restic-cache=/cache
+salvage.cranes.restic.mount.salvage-restic-ssh=/root/.ssh
+salvage.cranes.restic.mount.salvage-restic-secrets=/run/secrets
+```
 
-- SINGLE_REPO=false
+## Local validation
 
-Repository becomes:
+Run script-level tests:
 
-<REPO_BASE_LOCATION>/<machine>/<volume>
+```bash
+bash cranes/restic/test.sh
+```
 
-## Example Salvage labels (concept)
+## Setup Helpers (Restic-specific)
 
-- salvage.cranes.restic.image=ghcr.io/<owner>/<repo>-restic:master
-- salvage.cranes.restic.env.REPO_BASE_LOCATION=s3:s3.amazonaws.com/mybucket/prefix
-- salvage.cranes.restic.env.RESTIC_PASSWORD_FILE=/run/secrets/restic_password
-- salvage.cranes.restic.env.RESTIC_RETRY_LOCK=2h
+Helper files in this repository:
 
-Optional cache mount:
+- `cranes/restic/tools/.env.example`
+- `cranes/restic/tools/preflight.sh`
+- `cranes/restic/tools/install.sh`
+- `cranes/restic/tools/run-crane-smoke.sh`
+- `cranes/restic/examples/docker-compose.salvage.yml`
 
-- salvage.cranes.restic.mount.salvage-restic-cache=/cache
-- salvage.cranes.restic.env.RESTIC_CACHE_DIR=/cache
+Quick start:
+
+```bash
+cp cranes/restic/tools/.env.example cranes/restic/tools/.env
+bash cranes/restic/tools/preflight.sh
+bash cranes/restic/tools/install.sh
+docker compose --env-file cranes/restic/tools/.runtime.env -f cranes/restic/examples/docker-compose.salvage.yml up -d
+```
+
+Notes:
+
+- `.env` and `.runtime.env` are git-ignored in `cranes/restic/tools/`.
+- Smoke test one volume manually with:
+  - `bash cranes/restic/tools/run-crane-smoke.sh <docker-volume-name>`
+
+## Restore Drill (Restic-specific)
+
+Use this runbook to prove backups are restorable. Backup success without restore tests is not enough.
+
+Frequency:
+
+- run at least monthly
+- run after major crane/config changes
+
+Inputs:
+
+- `cranes/restic/tools/.runtime.env` generated by `cranes/restic/tools/install.sh`
+- target snapshot ID (or latest for selected host/tags)
+- empty restore target directory or volume
+
+Procedure:
+
+1. Select a representative volume.
+2. Pick snapshot:
+   - `restic snapshots --host <machine-volume-host> --tag salvage --tag vol-<volume>`
+3. Restore to a temp location:
+   - `restic restore <snapshot-id> --target /tmp/restic-restore-test`
+4. Validate structure:
+   - `/tmp/restic-restore-test/salvage/meta/meta.json` exists
+   - `/tmp/restic-restore-test/salvage/volume` exists
+5. Validate sample data in restored volume subtree.
+6. Record date/time, volume, snapshot ID, duration, pass/fail, notes.
+
+Pass criteria:
+
+- restore exits `0`
+- metadata and volume paths exist
+- restored sample data is usable
+
+Failure handling:
+
+1. Freeze retention/prune changes until root cause is known.
+2. Preserve logs and failing snapshot ID.
+3. Re-run smoke backup and restore test after remediation.

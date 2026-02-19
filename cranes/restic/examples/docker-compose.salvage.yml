@@ -1,0 +1,53 @@
+services:
+  salvage:
+    image: ${SALVAGE_IMAGE}
+    container_name: salvage
+    restart: unless-stopped
+
+    environment:
+      MACHINE: ${MACHINE}
+      TZ: ${TZ}
+
+    labels:
+      - "salvage.root=true"
+
+      - "salvage.tides.${TIDE_NAME}.cron=${TIDE_CRON}"
+      - "salvage.tides.${TIDE_NAME}.grouping=${TIDE_GROUPING}"
+      - "salvage.tides.${TIDE_NAME}.crane=restic"
+      - "salvage.tides.${TIDE_NAME}.maxConcurrent=${TIDE_MAX_CONCURRENT}"
+
+      - "salvage.cranes.restic.image=${RESTIC_CRANE_IMAGE}"
+      - "salvage.cranes.restic.pullOnRun=false"
+      - "salvage.cranes.restic.env.REPO_BASE_LOCATION=${REPO_BASE_LOCATION}"
+      - "salvage.cranes.restic.env.RESTIC_PASSWORD_FILE=/run/secrets/${RESTIC_PASSWORD_FILENAME}"
+      - "salvage.cranes.restic.env.RESTIC_CACHE_DIR=/cache"
+      - "salvage.cranes.restic.env.SINGLE_REPO=${SINGLE_REPO}"
+      - "salvage.cranes.restic.env.RESTIC_RETRY_LOCK=${RESTIC_RETRY_LOCK}"
+      - "salvage.cranes.restic.env.FORGET_ARGS=${FORGET_ARGS}"
+      - "salvage.cranes.restic.env.DO_PRUNE=${DO_PRUNE}"
+      - "salvage.cranes.restic.env.VERIFY_SNAPSHOT=${VERIFY_SNAPSHOT}"
+      - "salvage.cranes.restic.env.VERIFY_REPOSITORY_CHECK=${VERIFY_REPOSITORY_CHECK}"
+      - "salvage.cranes.restic.env.VERIFY_REPOSITORY_CHECK_READ_DATA_SUBSET=${VERIFY_REPOSITORY_CHECK_READ_DATA_SUBSET}"
+      - "salvage.cranes.restic.env.STRICT_HOST_KEY_CHECKING=${STRICT_HOST_KEY_CHECKING}"
+
+      - "salvage.cranes.restic.mount.${RESTIC_SSH_VOLUME}=/root/.ssh"
+      - "salvage.cranes.restic.mount.${RESTIC_SECRETS_VOLUME}=/run/secrets"
+      - "salvage.cranes.restic.mount.${RESTIC_CACHE_VOLUME}=/cache"
+
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+      - restic-ssh:/mnt/dummy/restic-ssh:ro
+      - restic-secrets:/mnt/dummy/restic-secrets:ro
+      - restic-cache:/mnt/dummy/restic-cache:ro
+
+volumes:
+  restic-ssh:
+    external: true
+    name: ${RESTIC_SSH_VOLUME}
+  restic-secrets:
+    external: true
+    name: ${RESTIC_SECRETS_VOLUME}
+  restic-cache:
+    external: true
+    name: ${RESTIC_CACHE_VOLUME}
