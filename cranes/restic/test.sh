@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SCRIPT_PATH="${SCRIPT_DIR}/binary.sh"
+SCRIPT_PATH="${SCRIPT_DIR}/tests/driver.sh"
 
 run_case() {
   local name="$1"
@@ -13,7 +13,7 @@ run_case() {
   echo "=== ${name} ==="
   set +e
   local output
-  output="$(env TESTING=true "$@" bash "$SCRIPT_PATH" 2>&1)"
+  output="$(env -i PATH="$PATH" HOME="${HOME:-/tmp}" "$@" bash "$SCRIPT_PATH" 2>&1)"
   local rc=$?
   set -e
 
@@ -127,4 +127,5 @@ run_case "Snapshot verification can be disabled explicitly" 0 "${COMMON_ENV[@]}"
   "TESTING_DUMP_RC=1"
 
 echo
+python3 "$SCRIPT_DIR/tests/regression.py"
 echo "All tests done"

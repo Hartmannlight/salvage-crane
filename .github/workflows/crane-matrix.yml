@@ -45,10 +45,10 @@ jobs:
       - name: Checkout
         uses: "actions/checkout@v3"
 
-      - name: Install shellcheck
+      - name: Install test dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y shellcheck
+          sudo apt-get install -y shellcheck jq bubblewrap
 
       - name: Run restic script tests
         run: bash cranes/restic/test.sh
@@ -60,6 +60,8 @@ jobs:
           bash -n cranes/restic/tools/preflight.sh
           bash -n cranes/restic/tools/install.sh
           bash -n cranes/restic/tools/run-crane-smoke.sh
+          bash -n cranes/restic/tools/repository.sh
+          bash -n cranes/restic/tools/setup-hetzner.sh
 
       - name: Run shellcheck
         run: |
@@ -68,10 +70,28 @@ jobs:
           shellcheck cranes/restic/tools/preflight.sh
           shellcheck cranes/restic/tools/install.sh
           shellcheck cranes/restic/tools/run-crane-smoke.sh
+          shellcheck cranes/restic/tools/repository.sh
+          shellcheck -x cranes/restic/tools/setup-hetzner.sh
+          shellcheck -x cranes/restic/tests/driver.sh cranes/restic/tests/mock-restic.sh
+          shellcheck cranes/restic/tests/image-smoke.sh
+
+      - name: Test backup, retention and restore with the image's restic version
+        run: |
+          version="$(sed -n 's/^ARG RESTIC_VERSION=//p' cranes/restic/Dockerfile)"
+          curl -fsSL --retry 3 -o /tmp/restic-test.bz2 "https://github.com/restic/restic/releases/download/v${version}/restic_${version}_linux_amd64.bz2"
+          bunzip2 /tmp/restic-test.bz2
+          chmod +x /tmp/restic-test
+          sudo python3 cranes/restic/tests/integration.py --restic /tmp/restic-test
+
+      - name: Test the Alpine crane image
+        run: |
+          docker build -t salvage-crane-restic:audit cranes/restic
+          bash cranes/restic/tests/image-smoke.sh salvage-crane-restic:audit
 
   build-docker:
     name: Build crane images
-    needs: changes
+    needs: [changes, restic-quality]
+    if: ${{ !cancelled() && needs.changes.result == 'success' && (needs.restic-quality.result == 'success' || needs.restic-quality.result == 'skipped') }}
     strategy:
       matrix:
         crane: ${{ fromJSON(needs.changes.outputs.cranes) }}

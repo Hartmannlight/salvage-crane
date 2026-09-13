@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# Extra-argument strings must never expand filesystem globs.
+set -f
 
 log()  { echo "[restic-crane] $*" >&2; }
 warn() { echo "[restic-crane][WARN] $*" >&2; }
@@ -28,7 +30,7 @@ require_int() {
   if [[ -z "$value" ]]; then
     die "Missing required environment variable: $name"
   fi
-  if ! [[ "$value" =~ ^[0-9]+$ ]]; then
+  if ! [[ "$value" =~ ^[0-9]{1,12}$ ]]; then
     die "Environment variable '$name' must be an integer (epoch seconds)."
   fi
 }
@@ -52,7 +54,9 @@ is_true() {
 
 split_repos() {
   local raw="$1"
-  local -a out=()
+  local -a out=() parts=()
+  local p
+  [[ "$raw" != *$'\n'* && "$raw" != *$'\r'* ]] || die "Repository locations must be on one line."
   local IFS=';'
   read -ra parts <<< "$raw"
   for p in "${parts[@]}"; do
@@ -65,7 +69,7 @@ split_repos() {
   if [[ "${#out[@]}" -eq 0 ]]; then
     die "REPO_BASE_LOCATION is empty (or only contains separators)."
   fi
-  printf '%s\0' "${out[@]}"
+  REPOS=("${out[@]}")
 }
 
 join_path() {
@@ -85,7 +89,7 @@ build_sftp_repo_location() {
   local path="$4"
 
   if [[ "$path" == /* ]]; then
-    printf 'sftp://%s@%s:%s%s' "$user" "$host" "$port" "$path"
+    printf 'sftp://%s@%s:%s/%s' "$user" "$host" "$port" "$path"
   else
     printf 'sftp://%s@%s:%s/%s' "$user" "$host" "$port" "$path"
   fi
@@ -118,8 +122,8 @@ resolve_repo_base_location() {
 
   local sftp_port
   sftp_port="$(trim "${SFTP_PORT:-23}")"
-  if ! [[ "$sftp_port" =~ ^[0-9]+$ ]]; then
-    die "SFTP_PORT must be an integer."
+  if ! [[ "$sftp_port" =~ ^[0-9]{1,5}$ ]] || (( 10#$sftp_port < 1 || 10#$sftp_port > 65535 )); then
+    die "SFTP_PORT must be between 1 and 65535."
   fi
 
   printf '%s' "$(build_sftp_repo_location "$sftp_host" "$sftp_user" "$sftp_port" "$sftp_path")"
@@ -127,7 +131,7 @@ resolve_repo_base_location() {
 
 is_sftp_repository() {
   local repo="$1"
-  [[ "$repo" == sftp://* ]]
+  [[ "$repo" == sftp:* ]]
 }
 
 validate_password_inputs() {
@@ -141,29 +145,26 @@ validate_password_inputs() {
   fi
   if [[ -n "$password_file" && -n "$password" ]]; then
     warn "Both RESTIC_PASSWORD_FILE and RESTIC_PASSWORD are set. RESTIC_PASSWORD_FILE is preferred."
+    unset RESTIC_PASSWORD
   fi
 
-  if ! is_true "${TESTING:-false}"; then
-    if [[ -n "$password_file" ]]; then
+  if [[ -n "$password_file" ]]; then
       [[ -f "$password_file" ]] || die "RESTIC_PASSWORD_FILE does not exist: $password_file"
       [[ -s "$password_file" ]] || die "RESTIC_PASSWORD_FILE is empty: $password_file"
-    fi
   fi
 }
 
 validate_runtime_mounts() {
-  if is_true "${TESTING:-false}"; then
-    return 0
-  fi
 
   [[ -d /salvage/volume ]] || die "/salvage/volume not found (mount missing?)"
+  # Dockerfile creates this directory too; its existence does not prove a mount.
+  awk '$5 == "/salvage/volume" { found=1 } END { exit !found }' /proc/self/mountinfo ||
+    die "/salvage/volume is not mounted; refusing to back up an empty image directory."
   [[ -d /salvage/meta ]] || die "/salvage/meta not found (mount missing?)"
+  [[ -n "$(find /salvage/meta -type f -print -quit)" ]] || die "Salvage metadata is missing."
 }
 
 validate_sftp_runtime_inputs() {
-  if is_true "${TESTING:-false}"; then
-    return 0
-  fi
   if ! is_sftp_repository "$RESTIC_REPOSITORY"; then
     return 0
   fi
@@ -185,62 +186,7 @@ validate_sftp_runtime_inputs() {
   fi
 }
 
-run_testing_restic() {
-  local joined=" $* "
-  echo "[TESTING] restic $*" >&2
-
-  if [[ "$joined" == *" cat config"* ]]; then
-    if is_true "${TESTING_REPO_EXISTS:-true}"; then
-      return 0
-    fi
-    echo "Is there a repository at the following location?" >&2
-    return 10
-  fi
-
-  if [[ "$joined" == *" init"* ]]; then
-    return "${TESTING_INIT_RC:-0}"
-  fi
-
-  if [[ "$joined" == *" backup"* ]]; then
-    local backup_rc="${TESTING_BACKUP_RC:-0}"
-    if [[ "$backup_rc" -eq 0 ]]; then
-      if is_true "${TESTING_BACKUP_NO_SNAPSHOT:-false}"; then
-        echo "{\"message_type\":\"summary\"}"
-      else
-        local snapshot_id="${TESTING_SNAPSHOT_ID:-deadbeef}"
-        echo "{\"message_type\":\"summary\",\"snapshot_id\":\"${snapshot_id}\"}"
-      fi
-    fi
-    return "$backup_rc"
-  fi
-
-  if [[ "$joined" == *" snapshots "* ]]; then
-    if is_true "${TESTING_SNAPSHOT_EXISTS:-true}"; then
-      return 0
-    fi
-    return "${TESTING_SNAPSHOTS_RC:-1}"
-  fi
-
-  if [[ "$joined" == *" dump "* ]]; then
-    return "${TESTING_DUMP_RC:-0}"
-  fi
-
-  if [[ "$joined" == *" forget "* ]]; then
-    return "${TESTING_FORGET_RC:-0}"
-  fi
-
-  if [[ "$joined" == *" check"* ]]; then
-    return "${TESTING_CHECK_RC:-0}"
-  fi
-
-  return 0
-}
-
 run_restic() {
-  if is_true "${TESTING:-false}"; then
-    run_testing_restic "$@"
-    return $?
-  fi
   "$RESTIC_BIN" "$@"
 }
 
@@ -248,15 +194,141 @@ build_global_args() {
   local -a args=()
   args+=(--retry-lock "$RETRY_LOCK")
   if [[ -n "$RESTIC_GLOBAL_ARGS" ]]; then
-    # shellcheck disable=SC2206
-    args+=( $RESTIC_GLOBAL_ARGS )
+    local -a extra=()
+    read -ra extra <<< "$RESTIC_GLOBAL_ARGS"
+    [[ "$RESTIC_GLOBAL_ARGS" != *$'\n'* ]] || die "RESTIC_ARGS must be on one line."
+    local index=0 option word value
+    while (( index < ${#extra[@]} )); do
+      word="${extra[index]}"
+      option="${word%%=*}"
+      case "$option" in
+        --no-cache|--cleanup-cache|--verbose|-v|-vv|--json)
+          [[ "$word" == "$option" || "$word" =~ ^--verbose=[12]$ ]] || die "Invalid RESTIC_ARGS option."
+          args+=("$word") ;;
+        --compression|--limit-upload|--limit-download|--pack-size|--cache-dir|--cacert|--tls-client-cert|--key-hint|--http-user-agent|--stuck-request-timeout|--option|-o)
+          if [[ "$word" == *=* ]]; then
+            value="${word#*=}"
+          else
+            index=$((index + 1))
+            value="${extra[index]:-}"
+          fi
+          [[ -n "$value" && "$value" != -* ]] || die "Missing value for $option."
+          if [[ "$option" == --option || "$option" == -o ]]; then
+            [[ "$value" != sftp.args=* && "$value" != sftp.command=* ]] || die "Use SSH_* settings to configure SFTP."
+            # Preserve commas/quotes as part of one backend option, not extra CSV entries.
+            value="${value//\"/\"\"}"
+            value="\"$value\""
+          fi
+          args+=("$option" "$value") ;;
+        *) die "Unsupported RESTIC_ARGS option: $option." ;;
+      esac
+      index=$((index + 1))
+    done
   fi
-  printf '%s\0' "${args[@]}"
+  GLOBAL_ARGS=("${args[@]}")
+}
+
+# Retention accepts policy options only. Snapshot IDs bypass restic's filters;
+# extra --tag/--host flags broaden them. Neither belongs in FORGET_ARGS.
+validate_forget_args() {
+  FORGET_OPTIONS=()
+  local -a words=()
+  read -ra words <<< "$FORGET_ARGS"
+  [[ "$FORGET_ARGS" != *$'\n'* ]] || die "FORGET_ARGS must be on one line."
+  local index=0 option value word
+  while (( index < ${#words[@]} )); do
+    word="${words[index]}"
+    option="${word%%=*}"
+    case "$option" in
+      --dry-run)
+        [[ "$word" == "$option" ]] || die "Invalid FORGET_ARGS option."
+        FORGET_OPTIONS+=("$option")
+        index=$((index + 1))
+        continue ;;
+      --keep-last|--keep-hourly|--keep-daily|--keep-weekly|--keep-monthly|--keep-yearly|--keep-within|--keep-within-hourly|--keep-within-daily|--keep-within-weekly|--keep-within-monthly|--keep-within-yearly|--keep-tag) ;;
+      *) die "Unsupported FORGET_ARGS option: $option (only --keep-* policies and --dry-run are allowed)." ;;
+    esac
+    if [[ "$word" == *=* ]]; then
+      value="${word#*=}"
+    else
+      index=$((index + 1))
+      value="${words[index]:-}"
+    fi
+    [[ -n "$value" && "$value" != -* ]] || die "Missing value for $option."
+    case "$option" in
+      --keep-tag) ;;
+      --keep-within*) [[ "$value" =~ ^([0-9]+[ymdh])+$ && "$value" =~ [1-9] ]] || die "Invalid duration for $option." ;;
+      *) [[ "$value" == unlimited || ( "$value" =~ ^[0-9]+$ && "$value" =~ [1-9] ) ]] || die "$option must be positive or unlimited." ;;
+    esac
+    FORGET_OPTIONS+=("$option" "$value")
+    index=$((index + 1))
+  done
+}
+
+validate_backup_args() {
+  BACKUP_OPTIONS=()
+  local -a words=()
+  read -ra words <<< "$BACKUP_ARGS"
+  [[ "$BACKUP_ARGS" != *$'\n'* ]] || die "BACKUP_ARGS must be on one line."
+  local index=0 option word value
+  while (( index < ${#words[@]} )); do
+    word="${words[index]}"
+    option="${word%%=*}"
+    case "$option" in
+      --exclude-caches|--force|-f|--ignore-ctime|--ignore-inode|--no-scan|--one-file-system|-x|--with-atime)
+        [[ "$word" == "$option" ]] || die "Invalid BACKUP_ARGS option."
+        BACKUP_OPTIONS+=("$word") ;;
+      --exclude|-e|--iexclude|--exclude-file|--iexclude-file|--exclude-if-present|--exclude-larger-than|--read-concurrency)
+        if [[ "$word" == *=* ]]; then
+          value="${word#*=}"
+        else
+          index=$((index + 1))
+          value="${words[index]:-}"
+        fi
+        [[ -n "$value" && "$value" != -* ]] || die "Missing value for $option."
+        BACKUP_OPTIONS+=("$option" "$value") ;;
+      *) die "Unsupported BACKUP_ARGS option: $option (source, identity and repository overrides are not allowed)." ;;
+    esac
+    index=$((index + 1))
+  done
+}
+
+quote_ssh_arg() {
+  # Restic's splitter preserves escapes inside quotes and does not concatenate
+  # adjacent quoted strings. Choose a delimiter absent from the entire value.
+  [[ "$1" != *\\ ]] || die "SSH arguments cannot end in a backslash."
+  if [[ "$1" != *"'"* ]]; then
+    printf "'%s'" "$1"
+  elif [[ "$1" != *'"'* ]]; then
+    printf '"%s"' "$1"
+  else
+    die "SSH arguments cannot contain both single and double quotes."
+  fi
+}
+
+configure_sftp() {
+  is_sftp_repository "$RESTIC_REPOSITORY" || return 0
+  local strict=yes known_hosts="${SSH_KNOWN_HOSTS_FILE:-/root/.ssh/known_hosts}"
+  require_bool STRICT_HOST_KEY_CHECKING "${STRICT_HOST_KEY_CHECKING:-true}"
+  if ! is_true "${STRICT_HOST_KEY_CHECKING:-true}"; then
+    strict=no
+    known_hosts=/dev/null
+  fi
+  local ssh_args
+  ssh_args="-oBatchMode=yes -oIdentitiesOnly=yes -oStrictHostKeyChecking=$strict"
+  ssh_args+=" -i $(quote_ssh_arg "${SSH_KEY_FILE:-/root/.ssh/id_ed25519}")"
+  # OpenSSH parses -o values again as config lines, so quote the path there too.
+  [[ "$known_hosts" != *[\"\'\\]* ]] || die "SSH_KNOWN_HOSTS_FILE cannot contain quotes or backslashes."
+  ssh_args+=" -o $(quote_ssh_arg "UserKnownHostsFile=\"$known_hosts\"")"
+  # Restic's --option flag parses CSV before its SFTP backend parses quoting.
+  local option="sftp.args=$ssh_args"
+  option="${option//\"/\"\"}"
+  GLOBAL_ARGS+=(-o "\"$option\"")
 }
 
 extract_snapshot_id() {
   local output="$1"
-  printf '%s\n' "$output" | sed -n 's/.*"snapshot_id":"\([^"]\+\)".*/\1/p' | tail -n 1
+  printf '%s\n' "$output" | jq -Rr 'fromjson? | select(.message_type == "summary") | .snapshot_id // empty' | tail -n 1
 }
 
 ensure_repo() {
@@ -272,9 +344,13 @@ ensure_repo() {
     return 0
   fi
 
-  if [[ $rc -eq 10 ]] || echo "$output" | grep -qi "Is there a repository at the following location"; then
+  # The pinned restic version has a dedicated missing-repository exit code.
+  if [[ $rc -eq 10 ]]; then
     log "Repository not found. Initializing..."
-    run_restic "${GLOBAL_ARGS[@]}" init
+    if ! run_restic "${GLOBAL_ARGS[@]}" init; then
+      # Another crane may have initialized the shared repository in the meantime.
+      run_restic "${GLOBAL_ARGS[@]}" cat config >/dev/null || die "Repository initialization failed."
+    fi
     log "Repository initialized."
     return 0
   fi
@@ -298,10 +374,7 @@ do_backup() {
     "${tag_args[@]}"
   )
 
-  if [[ -n "$BACKUP_ARGS" ]]; then
-    # shellcheck disable=SC2206
-    cmd+=( $BACKUP_ARGS )
-  fi
+  cmd+=( "${BACKUP_OPTIONS[@]}" )
 
   cmd+=( /salvage/meta /salvage/volume )
 
@@ -318,7 +391,7 @@ do_backup() {
   if [[ $rc -eq 0 ]]; then
     local snapshot_id
     snapshot_id="$(extract_snapshot_id "$output")"
-    if [[ -z "$snapshot_id" ]]; then
+    if ! [[ "$snapshot_id" =~ ^[a-f0-9]{8,64}$ ]]; then
       die "Backup completed but no snapshot_id was reported by restic."
     fi
     log "Backup completed (snapshot: $snapshot_id)."
@@ -341,8 +414,19 @@ verify_snapshot() {
   fi
 
   log "Verifying snapshot ${snapshot_id}..."
-  run_restic "${GLOBAL_ARGS[@]}" snapshots "$snapshot_id" >/dev/null
-  run_restic "${GLOBAL_ARGS[@]}" dump "$snapshot_id" /salvage/meta/meta.json >/dev/null
+  # snapshots can return success with no matching snapshots. cat must resolve one.
+  run_restic "${GLOBAL_ARGS[@]}" cat snapshot "$snapshot_id" |
+    jq -e --arg host "$RESTIC_HOST" --arg vol "$TAG_VOL" --arg machine "$TAG_MACHINE" --arg crane "$TAG_CRANE" '
+      .hostname == $host and
+      ((["salvage", $vol, $machine, $crane] - .tags) | length == 0)
+    ' >/dev/null || die "Snapshot identity verification failed."
+  # Check the actual tree, since snapshot.paths also includes excluded sources.
+  run_restic "${GLOBAL_ARGS[@]}" ls --json "$snapshot_id" /salvage |
+    jq -se 'any(.[]; .type == "dir" and .path == "/salvage/volume") and
+            any(.[]; .type == "dir" and .path == "/salvage/meta")' >/dev/null ||
+    die "Snapshot is missing a required source directory."
+  # The metadata layout belongs to Salvage, not to the crane.
+  run_restic "${GLOBAL_ARGS[@]}" dump "$snapshot_id" /salvage/meta >/dev/null
   log "Snapshot verification successful."
 }
 
@@ -366,19 +450,15 @@ do_forget_if_configured() {
     return 0
   fi
 
-  local -a tag_args=(
-    --tag "$TAG_VOL"
-    --tag "$TAG_MACHINE"
-    --tag "$TAG_CRANE"
-    --tag "$TAG_MAIN"
-  )
+  # Multiple --tag flags are ORed by restic; one comma-separated list is ANDed.
+  local -a tag_args=(--tag "$TAG_MAIN,$TAG_VOL,$TAG_MACHINE,$TAG_CRANE")
 
   log "Running forget (scoped to this volume via host and tags)..."
   # shellcheck disable=SC2206
   local -a args=( "${GLOBAL_ARGS[@]}" forget
     --host "$RESTIC_HOST"
     "${tag_args[@]}"
-    $FORGET_ARGS
+    "${FORGET_OPTIONS[@]}"
   )
 
   if is_true "$DO_PRUNE"; then
@@ -390,12 +470,18 @@ do_forget_if_configured() {
   log "Forget completed."
 }
 
-main() {
+configure_crane() {
+  [[ "${TESTING:-false}" == false ]] || die "TESTING is not supported in the runtime crane."
   # Required by Salvage interface
   require_env SALVAGE_MACHINE_NAME
   require_env SALVAGE_CRANE_NAME
   require_env SALVAGE_VOLUME_NAME
   require_int SALVAGE_TIDE_TIMESTAMP
+  local identity
+  for identity in SALVAGE_MACHINE_NAME SALVAGE_CRANE_NAME SALVAGE_VOLUME_NAME; do
+    [[ "${!identity}" != *[,/]* && "${!identity}" != . && "${!identity}" != .. ]] ||
+      die "$identity must not contain commas, slashes or traversal components."
+  done
 
   # Crane configuration
   REPO_BASE_LOCATION_RESOLVED="$(resolve_repo_base_location)"
@@ -415,10 +501,12 @@ main() {
   require_bool "DO_PRUNE" "$DO_PRUNE"
   require_bool "VERIFY_SNAPSHOT" "$VERIFY_SNAPSHOT"
   require_bool "VERIFY_REPOSITORY_CHECK" "$VERIFY_REPOSITORY_CHECK"
-  mapfile -d '' GLOBAL_ARGS < <(build_global_args)
+  build_global_args
+  validate_forget_args
+  validate_backup_args
 
-  mapfile -d '' REPOS < <(split_repos "$REPO_BASE_LOCATION_RESOLVED")
-  DAY_INDEX=$(( SALVAGE_TIDE_TIMESTAMP / 86400 ))
+  split_repos "$REPO_BASE_LOCATION_RESOLVED"
+  DAY_INDEX=$(( 10#$SALVAGE_TIDE_TIMESTAMP / 86400 ))
   REPO_INDEX=$(( DAY_INDEX % ${#REPOS[@]} ))
   REPO_BASE="${REPOS[$REPO_INDEX]}"
 
@@ -459,17 +547,23 @@ main() {
   log "Repository: ${RESTIC_REPOSITORY} (${MODE_DESC})"
   log "Host: ${RESTIC_HOST}"
   log "Tags: ${TAG_MAIN}, ${TAG_VOL}, ${TAG_MACHINE}, ${TAG_CRANE}"
+}
 
+main() {
+  configure_crane
   validate_runtime_mounts
   validate_sftp_runtime_inputs
+  configure_sftp
 
   ensure_repo
   local snapshot_id
   snapshot_id="$(do_backup)"
   verify_snapshot "$snapshot_id"
-  do_forget_if_configured
   run_repository_check_if_enabled
+  do_forget_if_configured
   log "Done."
 }
 
-main
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main
+fi

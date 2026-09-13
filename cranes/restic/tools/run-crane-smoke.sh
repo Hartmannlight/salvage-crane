@@ -40,6 +40,7 @@ load_if_exists() {
 main() {
   require_cmd docker
   require_cmd date
+  require_cmd jq
 
   load_if_exists "$ENV_FILE"
   load_if_exists "$RUNTIME_ENV_FILE"
@@ -55,27 +56,22 @@ main() {
   require_non_empty RESTIC_CACHE_VOLUME
   require_non_empty RESTIC_PASSWORD_FILENAME
 
+  docker volume inspect "$target_volume" >/dev/null || die "Source volume does not exist: $target_volume"
+
   local tide_timestamp
   tide_timestamp="$(date +%s)"
 
   local tmp_meta
   tmp_meta="$(mktemp -d)"
-  trap 'rm -rf "$tmp_meta"' EXIT
+  # Capture the local variable now: main's locals no longer exist at EXIT.
+  # shellcheck disable=SC2064
+  trap "$(printf 'rm -rf -- %q' "$tmp_meta")" EXIT
 
-  cat > "${tmp_meta}/meta.json" <<EOF
-{
-  "hostMeta": {
-    "startTime": ${tide_timestamp}000,
-    "executionStart": ${tide_timestamp}000,
-    "host": "${MACHINE}"
-  },
-  "volumeMeta": {
-    "name": "${target_volume}"
-  },
-  "crane": "restic-smoke",
-  "image": "${RESTIC_CRANE_IMAGE}"
-}
-EOF
+  jq -n --arg machine "$MACHINE" --arg volume "$target_volume" --arg image "$RESTIC_CRANE_IMAGE" \
+    --argjson timestamp "${tide_timestamp}000" '
+    {hostMeta: {timestamp: $timestamp, executionStart: $timestamp, host: $machine},
+     volumeMeta: {name: $volume}, crane: "restic-smoke", image: $image}
+    ' > "${tmp_meta}/meta.json"
 
   log "Running smoke backup for volume: ${target_volume}"
   docker run --rm \
@@ -93,8 +89,8 @@ EOF
     -e RESTIC_CACHE_DIR="/cache" \
     -e SINGLE_REPO="${SINGLE_REPO:-true}" \
     -e RESTIC_RETRY_LOCK="${RESTIC_RETRY_LOCK:-2h}" \
-    -e FORGET_ARGS="${FORGET_ARGS:-}" \
-    -e DO_PRUNE="${DO_PRUNE:-false}" \
+    -e FORGET_ARGS="" \
+    -e DO_PRUNE=false \
     -e VERIFY_SNAPSHOT="${VERIFY_SNAPSHOT:-true}" \
     -e VERIFY_REPOSITORY_CHECK="${VERIFY_REPOSITORY_CHECK:-false}" \
     -e VERIFY_REPOSITORY_CHECK_READ_DATA_SUBSET="${VERIFY_REPOSITORY_CHECK_READ_DATA_SUBSET:-1/200}" \
@@ -104,4 +100,6 @@ EOF
   log "Smoke backup completed successfully."
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

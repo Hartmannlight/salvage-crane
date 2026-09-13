@@ -37,8 +37,14 @@ require_bool() {
 }
 
 is_sftp_repo() {
-  local repo="$1"
-  [[ "$repo" == sftp://* ]]
+  local repo
+  local -a repos=()
+  IFS=';' read -ra repos <<< "$1"
+  for repo in "${repos[@]}"; do
+    repo="$(trim "$repo")"
+    [[ "$repo" == sftp:* ]] && return 0
+  done
+  return 1
 }
 
 build_sftp_repo_location() {
@@ -48,7 +54,7 @@ build_sftp_repo_location() {
   local path="$4"
 
   if [[ "$path" == /* ]]; then
-    printf 'sftp://%s@%s:%s%s' "$user" "$host" "$port" "$path"
+    printf 'sftp://%s@%s:%s/%s' "$user" "$host" "$port" "$path"
   else
     printf 'sftp://%s@%s:%s/%s' "$user" "$host" "$port" "$path"
   fi
@@ -80,8 +86,8 @@ resolve_repo_location() {
   if [[ -z "$sftp_host" || -z "$sftp_user" || -z "$sftp_path" ]]; then
     die "SFTP_HOST, SFTP_USER, and SFTP_PATH must be set together."
   fi
-  if ! [[ "$sftp_port" =~ ^[0-9]+$ ]]; then
-    die "SFTP_PORT must be an integer."
+  if ! [[ "$sftp_port" =~ ^[0-9]{1,5}$ ]] || (( 10#$sftp_port < 1 || 10#$sftp_port > 65535 )); then
+    die "SFTP_PORT must be between 1 and 65535."
   fi
 
   printf '%s' "$(build_sftp_repo_location "$sftp_host" "$sftp_user" "$sftp_port" "$sftp_path")"
@@ -127,8 +133,11 @@ validate_sftp_host_key_input() {
     [[ -f "$SSH_KNOWN_HOSTS_SOURCE" ]] || die "SSH_KNOWN_HOSTS_SOURCE does not exist: $SSH_KNOWN_HOSTS_SOURCE"
     [[ -s "$SSH_KNOWN_HOSTS_SOURCE" ]] || die "SSH_KNOWN_HOSTS_SOURCE is empty: $SSH_KNOWN_HOSTS_SOURCE"
   else
-    require_cmd ssh-keyscan
-    warn "SSH_KNOWN_HOSTS_SOURCE is not set. install.sh will generate known_hosts via ssh-keyscan."
+    local strict="${STRICT_HOST_KEY_CHECKING:-true}"
+    case "${strict,,}" in
+      0|false|no|n|off) ;;
+      *) die "SSH_KNOWN_HOSTS_SOURCE is required with strict host checking; supply independently verified host keys." ;;
+    esac
   fi
 }
 
@@ -169,4 +178,6 @@ main() {
   fi
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

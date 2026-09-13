@@ -60,7 +60,7 @@ build_sftp_repo_location() {
   local path="$4"
 
   if [[ "$path" == /* ]]; then
-    printf 'sftp://%s@%s:%s%s' "$user" "$host" "$port" "$path"
+    printf 'sftp://%s@%s:%s/%s' "$user" "$host" "$port" "$path"
   else
     printf 'sftp://%s@%s:%s/%s' "$user" "$host" "$port" "$path"
   fi
@@ -86,25 +86,21 @@ resolve_repo_location() {
   if [[ -z "$sftp_host" || -z "$sftp_user" || -z "$sftp_path" ]]; then
     die "Set REPO_BASE_LOCATION or all of SFTP_HOST/SFTP_USER/SFTP_PATH."
   fi
-  if ! [[ "$sftp_port" =~ ^[0-9]+$ ]]; then
-    die "SFTP_PORT must be an integer."
+  if ! [[ "$sftp_port" =~ ^[0-9]{1,5}$ ]] || (( 10#$sftp_port < 1 || 10#$sftp_port > 65535 )); then
+    die "SFTP_PORT must be between 1 and 65535."
   fi
 
   printf '%s' "$(build_sftp_repo_location "$sftp_host" "$sftp_user" "$sftp_port" "$sftp_path")"
 }
 
 is_sftp_repo() {
-  local repo="$1"
-  [[ "$repo" == sftp://* ]]
-}
-
-extract_sftp_host_port() {
-  local repo="$1"
-  if [[ "$repo" =~ ^sftp://[^@]+@([^:/]+):([0-9]+)/.*$ ]]; then
-    printf '%s\n' "${BASH_REMATCH[1]}"
-    printf '%s\n' "${BASH_REMATCH[2]}"
-    return 0
-  fi
+  local repo
+  local -a repos=()
+  IFS=';' read -ra repos <<< "$1"
+  for repo in "${repos[@]}"; do
+    repo="$(trim "$repo")"
+    [[ "$repo" == sftp:* ]] && return 0
+  done
   return 1
 }
 
@@ -130,7 +126,6 @@ prepare_password_file() {
 }
 
 prepare_known_hosts_file() {
-  local repo="$1"
   local tmpdir="$2"
   local known_hosts_source
   known_hosts_source="$(trim "${SSH_KNOWN_HOSTS_SOURCE:-}")"
@@ -142,15 +137,10 @@ prepare_known_hosts_file() {
     return 0
   fi
 
-  mapfile -t host_port < <(extract_sftp_host_port "$repo")
-  [[ "${#host_port[@]}" -eq 2 ]] || die "Could not extract host/port from SFTP repository URL."
-
-  local host="${host_port[0]}"
-  local port="${host_port[1]}"
-  require_cmd ssh-keyscan
-  log "Generating known_hosts via ssh-keyscan for ${host}:${port}"
-  ssh-keyscan -p "$port" "$host" > "${tmpdir}/known_hosts"
-  [[ -s "${tmpdir}/known_hosts" ]] || die "Generated known_hosts is empty."
+  if is_true "${STRICT_HOST_KEY_CHECKING:-true}"; then
+    die "SSH_KNOWN_HOSTS_SOURCE is required with strict host checking; supply independently verified host keys."
+  fi
+  : > "${tmpdir}/known_hosts"
 }
 
 copy_ssh_material() {
@@ -172,7 +162,7 @@ copy_ssh_material() {
   docker run --rm \
     -v "${RESTIC_SSH_VOLUME}:/dst" \
     -v "${tmpdir}:/src:ro" \
-    alpine sh -eu -c '
+    --entrypoint sh "${RESTIC_CRANE_IMAGE:-salvage-crane-restic:local}" -eu -c '
       mkdir -p /dst
       cp /src/id_ed25519 /dst/id_ed25519
       cp /src/known_hosts /dst/known_hosts
@@ -186,37 +176,46 @@ copy_password_material() {
   docker run --rm \
     -v "${RESTIC_SECRETS_VOLUME}:/dst" \
     -v "${tmpdir}:/src:ro" \
-    alpine sh -eu -c "
+    --entrypoint sh "${RESTIC_CRANE_IMAGE:-salvage-crane-restic:local}" -eu -c '
       mkdir -p /dst
-      cp /src/${RESTIC_PASSWORD_FILENAME} /dst/${RESTIC_PASSWORD_FILENAME}
-      chmod 600 /dst/${RESTIC_PASSWORD_FILENAME}
-    "
+      cp "/src/$1" "/dst/$1"
+      chmod 600 "/dst/$1"
+    ' sh "$RESTIC_PASSWORD_FILENAME"
+}
+
+# This file is consumed by both Compose and Bash. Single quotes prevent shell
+# execution and Compose interpolation of dollar signs, spaces and semicolons.
+write_env_value() {
+  local name="$1" value="$2"
+  [[ "$value" != *"'"* && "$value" != *$'\n'* && "$value" != *$'\r'* ]] ||
+    die "$name cannot contain single quotes or line breaks in the runtime env file."
+  printf "%s='%s'\n" "$name" "$value"
 }
 
 write_runtime_env_file() {
   local repo="$1"
   {
-    printf 'MACHINE=%s\n' "$MACHINE"
-    printf 'TZ=%s\n' "${TZ:-UTC}"
-    printf 'SALVAGE_IMAGE=%s\n' "${SALVAGE_IMAGE:-ghcr.io/chrisliebaer/salvage:master}"
-    printf 'RESTIC_CRANE_IMAGE=%s\n' "${RESTIC_CRANE_IMAGE:-salvage-crane-restic:local}"
-    printf 'TIDE_NAME=%s\n' "$TIDE_NAME"
-    printf 'TIDE_CRON=%s\n' "$TIDE_CRON"
-    printf 'TIDE_GROUPING=%s\n' "$TIDE_GROUPING"
-    printf 'TIDE_MAX_CONCURRENT=%s\n' "$TIDE_MAX_CONCURRENT"
-    printf 'REPO_BASE_LOCATION=%s\n' "$repo"
-    printf 'SINGLE_REPO=%s\n' "${SINGLE_REPO:-true}"
-    printf 'RESTIC_RETRY_LOCK=%s\n' "${RESTIC_RETRY_LOCK:-2h}"
-    printf 'FORGET_ARGS=%s\n' "${FORGET_ARGS:-}"
-    printf 'DO_PRUNE=%s\n' "${DO_PRUNE:-false}"
-    printf 'VERIFY_SNAPSHOT=%s\n' "${VERIFY_SNAPSHOT:-true}"
-    printf 'VERIFY_REPOSITORY_CHECK=%s\n' "${VERIFY_REPOSITORY_CHECK:-false}"
-    printf 'VERIFY_REPOSITORY_CHECK_READ_DATA_SUBSET=%s\n' "${VERIFY_REPOSITORY_CHECK_READ_DATA_SUBSET:-1/200}"
-    printf 'STRICT_HOST_KEY_CHECKING=%s\n' "${STRICT_HOST_KEY_CHECKING:-true}"
-    printf 'RESTIC_SSH_VOLUME=%s\n' "$RESTIC_SSH_VOLUME"
-    printf 'RESTIC_SECRETS_VOLUME=%s\n' "$RESTIC_SECRETS_VOLUME"
-    printf 'RESTIC_CACHE_VOLUME=%s\n' "$RESTIC_CACHE_VOLUME"
-    printf 'RESTIC_PASSWORD_FILENAME=%s\n' "$RESTIC_PASSWORD_FILENAME"
+    write_env_value MACHINE "$MACHINE"
+    write_env_value TZ "${TZ:-UTC}"
+    write_env_value SALVAGE_IMAGE "${SALVAGE_IMAGE:-ghcr.io/chrisliebaer/salvage:master}"
+    write_env_value RESTIC_CRANE_IMAGE "${RESTIC_CRANE_IMAGE:-salvage-crane-restic:local}"
+    write_env_value TIDE_NAME "$TIDE_NAME"
+    write_env_value TIDE_CRON "$TIDE_CRON"
+    write_env_value TIDE_GROUPING "$TIDE_GROUPING"
+    write_env_value TIDE_MAX_CONCURRENT "$TIDE_MAX_CONCURRENT"
+    write_env_value REPO_BASE_LOCATION "$repo"
+    write_env_value SINGLE_REPO "${SINGLE_REPO:-true}"
+    write_env_value RESTIC_RETRY_LOCK "${RESTIC_RETRY_LOCK:-2h}"
+    write_env_value FORGET_ARGS "${FORGET_ARGS:-}"
+    write_env_value DO_PRUNE "${DO_PRUNE:-false}"
+    write_env_value VERIFY_SNAPSHOT "${VERIFY_SNAPSHOT:-true}"
+    write_env_value VERIFY_REPOSITORY_CHECK "${VERIFY_REPOSITORY_CHECK:-false}"
+    write_env_value VERIFY_REPOSITORY_CHECK_READ_DATA_SUBSET "${VERIFY_REPOSITORY_CHECK_READ_DATA_SUBSET:-1/200}"
+    write_env_value STRICT_HOST_KEY_CHECKING "${STRICT_HOST_KEY_CHECKING:-true}"
+    write_env_value RESTIC_SSH_VOLUME "$RESTIC_SSH_VOLUME"
+    write_env_value RESTIC_SECRETS_VOLUME "$RESTIC_SECRETS_VOLUME"
+    write_env_value RESTIC_CACHE_VOLUME "$RESTIC_CACHE_VOLUME"
+    write_env_value RESTIC_PASSWORD_FILENAME "$RESTIC_PASSWORD_FILENAME"
   } > "$RUNTIME_ENV_FILE"
 }
 
@@ -247,6 +246,7 @@ main() {
   require_non_empty RESTIC_SECRETS_VOLUME
   require_non_empty RESTIC_CACHE_VOLUME
   require_non_empty RESTIC_PASSWORD_FILENAME
+  [[ "$RESTIC_PASSWORD_FILENAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || die "RESTIC_PASSWORD_FILENAME must be a simple filename."
 
   require_bool "SINGLE_REPO" "${SINGLE_REPO:-true}"
   require_bool "DO_PRUNE" "${DO_PRUNE:-false}"
@@ -257,11 +257,17 @@ main() {
   local repo
   repo="$(resolve_repo_location)"
 
+  umask 077
   local tmpdir
   tmpdir="$(mktemp -d)"
-  trap 'rm -rf "$tmpdir"' EXIT
+  # Capture the local variable now: main's locals no longer exist at EXIT.
+  # shellcheck disable=SC2064
+  trap "$(printf 'rm -rf -- %q' "$tmpdir")" EXIT
 
   prepare_password_file "$tmpdir"
+  # Use the crane image for setup as well; no extra unpinned alpine:latest pull.
+  maybe_build_crane_image
+  docker image inspect "${RESTIC_CRANE_IMAGE:-salvage-crane-restic:local}" >/dev/null
 
   log "Ensuring Docker volumes exist..."
   docker volume create "$RESTIC_SSH_VOLUME" >/dev/null
@@ -271,12 +277,13 @@ main() {
   copy_ssh_material "$repo" "$tmpdir"
   copy_password_material "$tmpdir"
   write_runtime_env_file "$repo"
-  maybe_build_crane_image
 
   log "Install complete."
   log "Runtime env written to: $RUNTIME_ENV_FILE"
   log "Next step:"
-  log "docker compose --env-file cranes/restic/tools/.runtime.env -f cranes/restic/examples/docker-compose.salvage.yml up -d"
+  log "$(printf 'docker compose --env-file %q -f %q up -d' "$RUNTIME_ENV_FILE" "$CRANE_DIR/examples/docker-compose.salvage.yml")"
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

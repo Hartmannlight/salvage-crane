@@ -89,6 +89,9 @@ Crane-specific docs:
 - `cranes/borgbackup/README.md`
 - `cranes/restic/README.md`
 
+For Hetzner Storage Box subaccounts, see the tested
+[setup and restore guide](cranes/restic/README.md#hetzner-storage-box-einrichtung-und-wiederherstellung).
+
 ## Development Notes
 
 - Build restic crane locally:
