@@ -1,18 +1,6 @@
 name: Build modified cranes
-on:
-  push:
-    branches:
-      - "master"
-    tags:
-      - "v*"
-  pull_request:
-    branches:
-      - "master"
-
 env:
-  CRANE_DIR: "cranes"
-
-# https://github.com/dorny/paths-filter#examples
+  CRANE_DIR: cranes
 jobs:
   changes:
     runs-on: ubuntu-latest
@@ -20,20 +8,29 @@ jobs:
       contents: read
       pull-requests: read
     outputs:
-      cranes: ${{ steps.changes.outputs.changes }}
+      cranes: ${{ steps.select.outputs.cranes }}
     steps:
-      - name: Checkout
-        id: checkout
-        uses: "actions/checkout@v3"
-
-      - id: changes
-        uses: dorny/paths-filter@v2
-        with:
-          filters: |
-            dummy: "${{ env.CRANE_DIR }}/dummy/**"
-            borgbackup: "${{ env.CRANE_DIR }}/borgbackup/**"
-            restic: "${{ env.CRANE_DIR }}/restic/**"
-
+    - name: Checkout
+      id: checkout
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+    - id: changes
+      uses: dorny/paths-filter@15192bc058cc28a13dbf6cde61f19e18988b7af6
+      with:
+        filters: |
+          dummy: "${{ env.CRANE_DIR }}/dummy/**"
+          borgbackup: "${{ env.CRANE_DIR }}/borgbackup/**"
+          restic: "${{ env.CRANE_DIR }}/restic/**"
+    - name: Select maintenance images
+      id: select
+      env:
+        CHANGED: ${{ steps.changes.outputs.changes }}
+        EVENT: ${{ github.event_name }}
+      run: |
+        if [[ "$EVENT" == workflow_dispatch ]]; then
+          echo 'cranes=["restic"]' >> "$GITHUB_OUTPUT"
+        else
+          echo "cranes=$CHANGED" >> "$GITHUB_OUTPUT"
+        fi
   restic-quality:
     name: Restic quality checks
     needs: changes
@@ -42,56 +39,52 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Checkout
-        uses: "actions/checkout@v3"
-
-      - name: Install test dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y shellcheck jq bubblewrap
-
-      - name: Run restic script tests
-        run: bash cranes/restic/test.sh
-
-      - name: Validate shell syntax
-        run: |
-          bash -n cranes/restic/binary.sh
-          bash -n cranes/restic/test.sh
-          bash -n cranes/restic/tools/preflight.sh
-          bash -n cranes/restic/tools/install.sh
-          bash -n cranes/restic/tools/run-crane-smoke.sh
-          bash -n cranes/restic/tools/repository.sh
-          bash -n cranes/restic/tools/setup-hetzner.sh
-
-      - name: Run shellcheck
-        run: |
-          shellcheck cranes/restic/binary.sh
-          shellcheck cranes/restic/test.sh
-          shellcheck cranes/restic/tools/preflight.sh
-          shellcheck cranes/restic/tools/install.sh
-          shellcheck cranes/restic/tools/run-crane-smoke.sh
-          shellcheck cranes/restic/tools/repository.sh
-          shellcheck -x cranes/restic/tools/setup-hetzner.sh
-          shellcheck -x cranes/restic/tests/driver.sh cranes/restic/tests/mock-restic.sh
-          shellcheck cranes/restic/tests/image-smoke.sh
-
-      - name: Test backup, retention and restore with the image's restic version
-        run: |
-          version="$(sed -n 's/^ARG RESTIC_VERSION=//p' cranes/restic/Dockerfile)"
-          curl -fsSL --retry 3 -o /tmp/restic-test.bz2 "https://github.com/restic/restic/releases/download/v${version}/restic_${version}_linux_amd64.bz2"
-          bunzip2 /tmp/restic-test.bz2
-          chmod +x /tmp/restic-test
-          sudo python3 cranes/restic/tests/integration.py --restic /tmp/restic-test
-
-      - name: Test the Alpine crane image
-        run: |
-          docker build -t salvage-crane-restic:audit cranes/restic
-          bash cranes/restic/tests/image-smoke.sh salvage-crane-restic:audit
-
+    - name: Checkout
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+    - name: Install test dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y shellcheck jq bubblewrap
+    - name: Run restic script tests
+      run: bash cranes/restic/test.sh
+    - name: Validate shell syntax
+      run: |
+        bash -n cranes/restic/binary.sh
+        bash -n cranes/restic/test.sh
+        bash -n cranes/restic/tools/preflight.sh
+        bash -n cranes/restic/tools/install.sh
+        bash -n cranes/restic/tools/run-crane-smoke.sh
+        bash -n cranes/restic/tools/repository.sh
+        bash -n cranes/restic/tools/setup-hetzner.sh
+    - name: Run shellcheck
+      run: |
+        shellcheck cranes/restic/binary.sh
+        shellcheck cranes/restic/test.sh
+        shellcheck cranes/restic/tools/preflight.sh
+        shellcheck cranes/restic/tools/install.sh
+        shellcheck cranes/restic/tools/run-crane-smoke.sh
+        shellcheck cranes/restic/tools/repository.sh
+        shellcheck -x cranes/restic/tools/setup-hetzner.sh
+        shellcheck -x cranes/restic/tests/driver.sh cranes/restic/tests/mock-restic.sh
+        shellcheck cranes/restic/tests/image-smoke.sh
+    - name: Test backup, retention and restore with the image's restic version
+      run: |
+        version="$(sed -n 's/^ARG RESTIC_VERSION=//p' cranes/restic/Dockerfile)"
+        curl -fsSL --retry 3 -o /tmp/restic-test.bz2 "https://github.com/restic/restic/releases/download/v${version}/restic_${version}_linux_amd64.bz2"
+        bunzip2 /tmp/restic-test.bz2
+        chmod +x /tmp/restic-test
+        sudo python3 cranes/restic/tests/integration.py --restic /tmp/restic-test
+    - name: Test the Alpine crane image
+      run: |
+        docker build -t salvage-crane-restic:audit cranes/restic
+        bash cranes/restic/tests/image-smoke.sh salvage-crane-restic:audit
   build-docker:
     name: Build crane images
-    needs: [changes, restic-quality]
-    if: ${{ !cancelled() && needs.changes.result == 'success' && (needs.restic-quality.result == 'success' || needs.restic-quality.result == 'skipped') }}
+    needs:
+    - changes
+    - restic-quality
+    if: '!cancelled() && needs.changes.result == ''success'' && needs.changes.outputs.cranes != ''[]'' && (needs.restic-quality.result
+      == ''success'' || needs.restic-quality.result == ''skipped'')'
     strategy:
       matrix:
         crane: ${{ fromJSON(needs.changes.outputs.cranes) }}
@@ -99,41 +92,48 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
+      attestations: write
     steps:
-      - name: "Login to registry"
-        id: registry-login
-        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-        uses: "docker/login-action@v2"
-        with:
-          registry: ghcr.io
-          username: "${{ github.repository_owner }}"
-          password: "${{ secrets.GITHUB_TOKEN }}"
-
-      - name: Checkout
-        id: checkout
-        uses: "actions/checkout@v3"
-
-      - name: Docker meta
-        id: meta
-        uses: "docker/metadata-action@v4"
-        with:
-          images: "ghcr.io/${{ github.repository }}-${{ matrix.crane }}"
-          flavor: |
-            latest=auto
-          tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=ref,event=tag
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=edge,branch=master
-            type=sha
-            type=sha,format=long
-
-      - name: Build and push
-        uses: docker/build-push-action@v3
-        with:
-          context: "${{ env.CRANE_DIR }}/${{ matrix.crane }}"
-          push: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+    - uses: Hartmannlight/pipeline-toolkit/actions/build@abb469f033ee28e00ba1061a47dddfc7d961129a
+      with:
+        context: cranes/${{ matrix.crane }}
+        file: cranes/${{ matrix.crane }}/Dockerfile
+    - uses: Hartmannlight/pipeline-toolkit/actions/scan@abb469f033ee28e00ba1061a47dddfc7d961129a
+    - if: github.event_name != 'pull_request'
+      uses: Hartmannlight/pipeline-toolkit/actions/publish@abb469f033ee28e00ba1061a47dddfc7d961129a
+      with:
+        image: ghcr.io/hartmannlight/salvage-crane-${{ matrix.crane }}
+        token: ${{ secrets.GITHUB_TOKEN }}
+  maintenance-gate:
+    name: ci-gate
+    if: always()
+    needs:
+    - changes
+    - restic-quality
+    - build-docker
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+    - name: Require every check
+      env:
+        RESULTS: ${{ toJSON(needs) }}
+      run: |
+        python3 - <<'PY'
+        import json, os
+        results = json.loads(os.environ['RESULTS'])
+        failed = {name: value['result'] for name, value in results.items() if value['result'] not in ('success', 'skipped')}
+        if failed:
+            raise SystemExit(str(failed))
+        PY
+'on':
+  push:
+    branches:
+    - master
+    tags:
+    - v*
+  pull_request:
+    branches:
+    - master
+  workflow_dispatch: null
