@@ -127,6 +127,15 @@ def main():
     if not args.restic or not shutil.which("bwrap"):
         parser.error("Install restic and bubblewrap, or pass --restic /path/to/restic")
     with tempfile.TemporaryDirectory(prefix="restic-crane-integration-") as tmp:
+        # Namespace root cannot traverse a runner-owned private home directory.
+        # Stage only the test inputs under our own temporary directory instead
+        # of weakening checkout permissions or disabling namespace isolation.
+        work = Path(tmp) / "work"
+        shutil.copytree(ROOT, work)
+        crane = Path(tmp) / "crane"
+        restic = Path(tmp) / "restic"
+        shutil.copy2(Path(args.crane).resolve(), crane)
+        shutil.copy2(Path(args.restic).resolve(), restic)
         volume = Path(tmp) / "volume"
         meta = Path(tmp) / "meta"
         volume.mkdir()
@@ -140,8 +149,8 @@ def main():
                    "--ro-bind", "/usr", "/usr", "--symlink", "usr/bin", "/bin",
                    "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib64", "/lib64",
                    "--ro-bind", "/etc", "/etc", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
-                   "--ro-bind", str(ROOT), "/work", "--ro-bind", str(Path(args.crane).resolve()), "/crane",
-                   "--ro-bind", str(Path(args.restic).resolve()), "/restic",
+                   "--ro-bind", str(work), "/work", "--ro-bind", str(crane), "/crane",
+                   "--ro-bind", str(restic), "/restic",
                    "--ro-bind", str(volume), "/salvage/volume", "--ro-bind", str(meta), "/salvage/meta",
                    "--chdir", "/work", "/usr/bin/python3", "/work/tests/integration.py", "--inside"]
         sys.exit(subprocess.call(command))
