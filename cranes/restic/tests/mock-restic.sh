@@ -38,7 +38,7 @@ run_testing_restic() {
   fi
 
   if [[ "$joined" == *" ls "* ]]; then
-    printf '%s\n' '{"type":"dir","path":"/salvage/volume"}' '{"type":"dir","path":"/salvage/meta"}'
+    printf '%s\n' '{"type":"dir","path":"/salvage/volume"}' '{"type":"dir","path":"/salvage/meta"}' '{"type":"file","path":"/salvage/volume/payload"}'
     return 0
   fi
 
