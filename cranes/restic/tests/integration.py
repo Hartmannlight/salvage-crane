@@ -84,13 +84,21 @@ class RealResticTests(unittest.TestCase):
         self.assertIn(old, {s["id"] for s in self.snapshots()})
         self.assertNotIn("Running forget", result.stderr)
 
-    def test_excluded_volume_cannot_trigger_retention(self):
+    def test_explicit_source_is_preserved_despite_exclude(self):
         self.restic("init")
         old = self.seed("volume-a")
-        result = self.crane(success=False, BACKUP_ARGS="--exclude /salvage/volume", FORGET_ARGS="--keep-last 1")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn(old, {s["id"] for s in self.snapshots()})
-        self.assertNotIn("Running forget", result.stderr)
+        # Restic >=0.19 deliberately ignores exclusions of explicit source roots.
+        # Retention is safe only because the complete source remains restorable.
+        self.crane(BACKUP_ARGS="--exclude /salvage/volume", FORGET_ARGS="--keep-last 1")
+        snapshots = self.snapshots()
+        self.assertEqual(len(snapshots), 1)
+        self.assertNotEqual(snapshots[0]["id"], old)
+        target = self.tmp.name + "/restore"
+        self.restic("restore", snapshots[0]["id"], "--target", target, "--verify")
+        restored = Path(target) / "salvage/volume"
+        self.assertEqual((restored / "payload.bin").read_bytes(), Path("/salvage/volume/payload.bin").read_bytes())
+        self.assertEqual((restored / "empty").read_bytes(), b"")
+        self.assertEqual(os.readlink(restored / "link"), "payload.bin")
 
     def test_ssh_uses_configured_paths_and_strict_policy(self):
         fakebin = Path(self.tmp.name) / "bin"
