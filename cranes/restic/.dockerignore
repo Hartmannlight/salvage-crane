@@ -1,3 +1,6 @@
 **
 !Dockerfile
 !binary.sh
+!build-deps/
+!build-deps/go.mod
+!build-deps/go.sum

@@ -425,6 +425,13 @@ verify_snapshot() {
     jq -se 'any(.[]; .type == "dir" and .path == "/salvage/volume") and
             any(.[]; .type == "dir" and .path == "/salvage/meta")' >/dev/null ||
     die "Snapshot is missing a required source directory."
+  # Restic >=0.19 retains an explicitly supplied root even if an exclusion
+  # removes every child. A directory entry alone no longer proves coverage.
+  if [[ -n "$(find /salvage/volume -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+    run_restic "${GLOBAL_ARGS[@]}" ls --json "$snapshot_id" /salvage/volume |
+      jq -se 'any(.[]; (.path // "") | startswith("/salvage/volume/"))' >/dev/null ||
+      die "Snapshot contains no entries from the nonempty source volume; refusing retention."
+  fi
   # The metadata layout belongs to Salvage, not to the crane.
   run_restic "${GLOBAL_ARGS[@]}" dump "$snapshot_id" /salvage/meta >/dev/null
   log "Snapshot verification successful."
