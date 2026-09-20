@@ -2,5 +2,20 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "github>Hartmannlight/pipeline-toolkit"
+  ],
+  "packageRules": [
+    {
+      "description": "Restic 0.19.1 still imports the v4 module path; do not rewrite the mirrored build dependencies to a newer major.",
+      "matchManagers": [
+        "gomod"
+      ],
+      "matchPackageNames": [
+        "github.com/cenkalti/backoff/v4"
+      ],
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "enabled": false
+    }
   ]
 }
