@@ -15,8 +15,9 @@ Diese Datei definiert die verbindlichen Arbeitsregeln fuer Agenten in diesem Rep
 
 ## Aktueller Arbeitsfokus (verbindlich)
 
-- Fuehre funktionale Code-Aenderungen ausschliesslich in `cranes/restic/**` durch.
-- Nimm **keine** funktionalen Aenderungen in `cranes/borgbackup/**` vor.
+- Die regulaere Entwicklungsflaeche ist `cranes/restic/**`.
+- Fuer den beauftragten Backup-Sicherheitsaudit sind gezielte Korrekturen und Regressionstests in `cranes/borgbackup/**` ebenfalls erlaubt.
+- Keine fachfremden Borg-Refactorings; bestehende Archive bei Migrationen erhalten.
 
 ## Erlaubte Ausnahmen
 

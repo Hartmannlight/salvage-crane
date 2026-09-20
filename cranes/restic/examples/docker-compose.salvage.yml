@@ -3,6 +3,7 @@ services:
     image: ${SALVAGE_IMAGE}
     container_name: salvage
     restart: unless-stopped
+    stop_grace_period: 3m
 
     environment:
       MACHINE: ${MACHINE}

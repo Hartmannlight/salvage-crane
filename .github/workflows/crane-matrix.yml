@@ -18,7 +18,9 @@ jobs:
       with:
         filters: |
           dummy: "${{ env.CRANE_DIR }}/dummy/**"
-          borgbackup: "${{ env.CRANE_DIR }}/borgbackup/**"
+          borgbackup:
+            - "${{ env.CRANE_DIR }}/borgbackup/**"
+            - ".github/**"
           restic:
             - "${{ env.CRANE_DIR }}/restic/**"
             - ".github/**"
@@ -30,7 +32,7 @@ jobs:
         EVENT: ${{ github.event_name }}
       run: |
         if [[ "$EVENT" == workflow_dispatch ]]; then
-          echo 'cranes=["restic"]' >> "$GITHUB_OUTPUT"
+          echo 'cranes=["restic","borgbackup"]' >> "$GITHUB_OUTPUT"
         else
           echo "cranes=$CHANGED" >> "$GITHUB_OUTPUT"
         fi
@@ -82,16 +84,19 @@ jobs:
       run: |
         bash cranes/restic/tests/image-smoke.sh salvage-crane-restic:audit
   build-docker:
-    name: Build crane images
-    needs:
-    - changes
-    - restic-quality
-    if: '!cancelled() && needs.changes.result == ''success'' && needs.changes.outputs.cranes != ''[]'' && (needs.restic-quality.result
-      == ''success'' || needs.restic-quality.result == ''skipped'')'
+    name: Native ${{ matrix.crane }} / ${{ matrix.target.arch }}
+    needs: [changes, restic-quality]
+    if: >-
+      !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.cranes != '[]' &&
+      (needs.restic-quality.result == 'success' || needs.restic-quality.result == 'skipped')
     strategy:
+      fail-fast: false
       matrix:
         crane: ${{ fromJSON(needs.changes.outputs.cranes) }}
-    runs-on: ubuntu-latest
+        target:
+          - {arch: amd64, platform: linux/amd64, runner: ubuntu-24.04}
+          - {arch: arm64, platform: linux/arm64, runner: ubuntu-24.04-arm}
+    runs-on: ${{ matrix.target.runner }}
     permissions:
       contents: read
       packages: write
@@ -103,12 +108,63 @@ jobs:
       with:
         context: cranes/${{ matrix.crane }}
         file: cranes/${{ matrix.crane }}/Dockerfile
+        platform: ${{ matrix.target.platform }}
+    - name: Test the exact native candidate
+      env:
+        CRANE: ${{ matrix.crane }}
+      run: |
+        case "$CRANE" in
+          restic) bash cranes/restic/tests/image-smoke.sh candidate:gate ;;
+          borgbackup) python3 cranes/borgbackup/tests/integration.py candidate:gate ;;
+          dummy) docker run --rm candidate:gate ;;
+        esac
     - uses: Hartmannlight/pipeline-toolkit/actions/scan@abb469f033ee28e00ba1061a47dddfc7d961129a
+    - id: image
+      run: echo "name=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/salvage-crane-${{ matrix.crane }}" >> "$GITHUB_OUTPUT"
     - if: github.event_name != 'pull_request'
       uses: Hartmannlight/pipeline-toolkit/actions/publish@abb469f033ee28e00ba1061a47dddfc7d961129a
       with:
-        image: ghcr.io/hartmannlight/salvage-crane-${{ matrix.crane }}
+        image: ${{ steps.image.outputs.name }}-${{ matrix.target.arch }}
         token: ${{ secrets.GITHUB_TOKEN }}
+  publish-manifests:
+    name: Publish tested multi-platform images
+    needs: [changes, build-docker]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        crane: ${{ fromJSON(needs.changes.outputs.cranes) }}
+    steps:
+    - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
+    - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    - name: Assemble only the exact images that passed both native gates
+      env:
+        CRANE: ${{ matrix.crane }}
+        DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      run: |
+        image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/salvage-crane-$CRANE"
+        version="sha-$GITHUB_SHA-r$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+        refs=()
+        for arch in amd64 arm64; do
+          digest=$(docker buildx imagetools inspect "$image-$arch:$version" --format '{{json .Manifest.Digest}}' | tr -d '"')
+          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+          refs+=("$image-$arch@$digest")
+        done
+        tags=(-t "$image:$version")
+        if [[ "$GITHUB_REF" == "refs/heads/$DEFAULT_BRANCH" ]]; then
+          tags+=(-t "$image:latest" -t "$image:master" -t "$image:edge")
+        elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+          tags+=(-t "$image:$GITHUB_REF_NAME")
+        fi
+        docker buildx imagetools create "${tags[@]}" "${refs[@]}"
+        docker buildx imagetools inspect "$image:$version"
   maintenance-gate:
     name: ci-gate
     if: always()
@@ -116,6 +172,7 @@ jobs:
     - changes
     - restic-quality
     - build-docker
+    - publish-manifests
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

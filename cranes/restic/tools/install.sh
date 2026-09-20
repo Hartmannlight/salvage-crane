@@ -197,7 +197,7 @@ write_runtime_env_file() {
   {
     write_env_value MACHINE "$MACHINE"
     write_env_value TZ "${TZ:-UTC}"
-    write_env_value SALVAGE_IMAGE "${SALVAGE_IMAGE:-ghcr.io/chrisliebaer/salvage:master}"
+    write_env_value SALVAGE_IMAGE "${SALVAGE_IMAGE:-ghcr.io/hartmannlight/salvage:master}"
     write_env_value RESTIC_CRANE_IMAGE "${RESTIC_CRANE_IMAGE:-salvage-crane-restic:local}"
     write_env_value TIDE_NAME "$TIDE_NAME"
     write_env_value TIDE_CRON "$TIDE_CRON"

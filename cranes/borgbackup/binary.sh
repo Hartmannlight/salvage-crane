@@ -1,6 +1,7 @@
 #!/bin/bash
 
 set -eo pipefail
+set -f
 
 
 export BORG_ARGS="${BORG_ARGS:=--lock-wait 3600}"
@@ -111,11 +112,47 @@ export BORG_CACHE_DIR="$BORG_BASE_DIR/cache"
 export BORG_CONFIG_DIR="$BORG_BASE_DIR/config"
 
 
-# default is to use only the volume name as prefix, a common alternative is to use the machine name as well
-VOLUME_PREFIX="v_$SALVAGE_VOLUME_NAME"
-if [ -n "$CUSTOM_PREFIX" ]; then
-	VOLUME_PREFIX=$(eval "echo $CUSTOM_PREFIX")
+# A fixed-width digest of a NUL-delimited identity cannot overlap with another
+# machine/crane/volume, including names such as data and data-child. Legacy
+# archives intentionally remain outside automatic retention after this upgrade.
+IDENTITY_HASH=$(printf '%s\0' "$SALVAGE_MACHINE_NAME" "$SALVAGE_CRANE_NAME" "$SALVAGE_VOLUME_NAME" | sha256sum)
+VOLUME_PREFIX="salvage-v2-${IDENTITY_HASH%% *}"
+ARCHIVE_PREFIX="$VOLUME_PREFIX"
+if [ -n "${CUSTOM_PREFIX:-}" ]; then
+	# Support the documented identity placeholders without evaluating shell code.
+	CUSTOM_PREFIX=${CUSTOM_PREFIX//'${SALVAGE_MACHINE_NAME}'/$SALVAGE_MACHINE_NAME}
+	CUSTOM_PREFIX=${CUSTOM_PREFIX//'${SALVAGE_CRANE_NAME}'/$SALVAGE_CRANE_NAME}
+	CUSTOM_PREFIX=${CUSTOM_PREFIX//'${SALVAGE_VOLUME_NAME}'/$SALVAGE_VOLUME_NAME}
+	[[ "$CUSTOM_PREFIX" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,79}$ ]] || {
+		echo 'CUSTOM_PREFIX must expand to a simple name of at most 80 characters.' >&2
+		exit 1
+	}
+	ARCHIVE_PREFIX="$VOLUME_PREFIX-$CUSTOM_PREFIX"
 fi
+
+# Do not let extra selection flags broaden the retention scope.
+read -ra PRUNE_OPTIONS <<< "$PRUNE_ARGS"
+[[ "$PRUNE_ARGS" != *$'\n'* ]] || { echo 'PRUNE_ARGS must be on one line.' >&2; exit 1; }
+for ((i=0; i<${#PRUNE_OPTIONS[@]}; i++)); do
+	word=${PRUNE_OPTIONS[i]}
+	option=${word%%=*}
+	case "$option" in
+		--dry-run) [[ "$word" == --dry-run ]] || exit 1; continue ;;
+		--keep-last|--keep-secondly|--keep-minutely|--keep-hourly|--keep-daily|--keep-weekly|--keep-monthly|--keep-yearly|--keep-within) ;;
+		*) echo "Unsupported PRUNE_ARGS option: $option" >&2; exit 1 ;;
+	esac
+	if [[ "$word" == *=* ]]; then
+		value=${word#*=}
+	else
+		i=$((i+1))
+		value=${PRUNE_OPTIONS[i]:-}
+	fi
+	if [[ "$option" == --keep-within ]]; then
+		[[ "$value" =~ ^[1-9][0-9]*[Hdwmy]$ ]] || { echo 'Invalid retention interval.' >&2; exit 1; }
+	else
+		[[ "$value" == -1 || "$value" =~ ^[1-9][0-9]*$ ]] || { echo 'Retention counts must be positive or -1.' >&2; exit 1; }
+	fi
+done
 
 # first time requires repo creation, borg has no built-in method for checking so we rely on unstable output
 echo "calling init if repo does not already exist"
@@ -134,14 +171,14 @@ echo "calling create"
 "$BORG" --show-rc $BORG_ARGS create \
 	$CREATE_ARGS \
 	--list \
-	::"$VOLUME_PREFIX-$(date +%Y-%m-%d_%H-%M-%S)" \
+	::"$ARCHIVE_PREFIX-$(date +%Y-%m-%d_%H-%M-%S)-$(cat /proc/sys/kernel/random/uuid)" \
 	.
 
 if [ -n "$PRUNE_ARGS" ]; then
 
 	echo "calling prune"
 	"$BORG" --show-rc $BORG_ARGS prune \
-		$PRUNE_ARGS \
+		"${PRUNE_OPTIONS[@]}" \
 		--list \
 		--glob-archives "$VOLUME_PREFIX-*"
 
