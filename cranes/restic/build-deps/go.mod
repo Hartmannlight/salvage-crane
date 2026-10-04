@@ -7,7 +7,7 @@ go 1.26.0
 godebug winsymlink=0
 
 require (
-	cloud.google.com/go/storage v1.68.0
+	cloud.google.com/go/storage v1.69.0
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.23.2
 	github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.14.1
 	github.com/Azure/azure-sdk-for-go/sdk/storage/azblob v1.8.1
@@ -81,7 +81,7 @@ require (
 	github.com/google/s2a-go v0.1.10 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.22 // indirect
-	github.com/googleapis/gax-go/v2 v2.24.1 // indirect
+	github.com/googleapis/gax-go/v2 v2.26.2 // indirect
 	github.com/huandu/xstrings v1.3.2 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/klauspost/cpuid/v2 v2.4.0 // indirect
