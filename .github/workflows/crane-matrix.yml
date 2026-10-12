@@ -72,9 +72,15 @@ jobs:
         shellcheck -x cranes/restic/tools/setup-hetzner.sh
         shellcheck -x cranes/restic/tests/driver.sh cranes/restic/tests/mock-restic.sh
         shellcheck cranes/restic/tests/image-smoke.sh
+    - name: Set up Docker builder with upstream cache
+      uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
+      with:
+        buildkitd-config-inline: |
+          [registry."docker.io"]
+            mirrors = ["mirror.gcr.io"]
     - name: Test backup, retention and restore with the image's restic version
       run: |
-        docker build -t salvage-crane-restic:audit cranes/restic
+        docker buildx build --load -t salvage-crane-restic:audit cranes/restic
         container=$(docker create --entrypoint /bin/true salvage-crane-restic:audit)
         docker cp "$container:/usr/local/bin/restic" /tmp/restic-test
         docker rm "$container"
