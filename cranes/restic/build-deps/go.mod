@@ -33,7 +33,7 @@ require (
 	github.com/spf13/pflag v1.0.10
 	go.uber.org/automaxprocs v1.6.0
 	golang.org/x/crypto v0.57.0
-	golang.org/x/net v0.59.0
+	golang.org/x/net v0.60.0
 	golang.org/x/oauth2 v0.37.0
 	golang.org/x/sync v0.23.0
 	golang.org/x/sys v0.48.0
